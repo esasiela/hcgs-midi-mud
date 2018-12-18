@@ -1,42 +1,67 @@
 /*
- * hc-midi-mud-firmware
- * 
- * This is the Arduino Nano firmware for the Hedge Court MIDI Mud step sequencer.  The device is a MIDI controller stepping through 8 beats and two instruments.
- * User specifies what beats each instrument is to play on using buttons (simultaneously press the button for the instrument and the beat).
- * Tempo is controlled by potentiometer.
- * 
- * 24 LEDs, organized as 3 groups of 8
- *  - Group 0 is the beat indicator, only one lights at a time
- *  - Group 1 is instrument 1, shows what beats will play this instrument
- *  - Group 2 is instrument 2, shows what beats will play this instrument
- *  
- * Group of 8 buttons (beat selectors) and group of 2 buttons (instrument selectors)
- * - Hold down the instrument selector, and press the beat selectors to toggle play/no-play of the selected instrument on the selected beat.
- * 
- * Potentiometer 1 specifies the tempo
- * Potentiometer 2 is unused as of this writing
- * 
- * Group of 2 buttons is unused as of this writing
- * 
- * Pin Usage:
- * 
- * 2,3,4 - LED column register (serial out)
- * 5,6,7 - LED row transistors
- * 8,9 - MIDI software serial
- * 10,11,12 - Beat Select buttons (serial in)
- * 13 *** UNUSED, see A3 - manually adjusted circuit to move from 13 to A3, no input pullup on 13
- * A0 - Button 1 (select instrument 2)
- * A1 - Button 2 (unassigned function)
- * A2 - Button 3 (unassigned function)
- * A3 - Button 0 (select instrument 1)
- * A4 - unused
- * A5 - unused
- * A6 - Potentiometer 1 (tempo)
- * A7 - Potentiometer 2 (unassigned function)
- */
+   hc-midi-mud-firmware
+
+   This is the Arduino Nano firmware for the Hedge Court MIDI Mud step sequencer.  The device is a MIDI controller stepping through 8 beats and two instruments.
+   User specifies what beats each instrument is to play on using buttons (simultaneously press the button for the instrument and the beat).
+   Tempo is controlled by potentiometer.
+
+   24 LEDs, organized as 3 groups of 8
+    - Group 0 is the beat indicator, only one lights at a time
+    - Group 1 is instrument 1, shows what beats will play this instrument
+    - Group 2 is instrument 2, shows what beats will play this instrument
+
+   Group of 8 buttons (beat selectors) and group of 2 buttons (instrument selectors)
+   - Hold down the instrument selector, and press the beat selectors to toggle play/no-play of the selected instrument on the selected beat.
+
+   Potentiometer 1 specifies the tempo
+   Potentiometer 2 is unused as of this writing
+
+   Group of 2 buttons is unused as of this writing
+
+   Pin Usage:
+
+   2,3,4 - LED column register (serial out)
+   5,6,7 - LED row transistors
+   8,9 - MIDI software serial
+   10,11,12 - Beat Select buttons (serial in)
+   13 *** UNUSED, see A3 - manually adjusted circuit to move from 13 to A3, no input pullup on 13
+   A0 - Button 1 (select instrument 2)
+   A1 - Button 2 (unassigned function)
+   A2 - Button 3 (unassigned function)
+   A3 - Button 0 (select instrument 1)
+   A4 - unused
+   A5 - unused
+   A6 - Potentiometer 1 (tempo)
+   A7 - Potentiometer 2 (unassigned function)
+*/
 
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
+
 #include <HC_BouncyButton.h>
+
+
+/***
+   EEPROM addresses
+*/
+
+const int EEPROM_ADDR_MIDI_CHANNEL = 0;
+const int EEPROM_ADDR_NOTE_1 = 1;
+const int EEPROM_ADDR_NOTE_2 = 2;
+const int EEPROM_ADDR_NOTE_R = 3;
+const int EEPROM_ADDR_NOTE_Z = 4;
+const int EEPROM_ADDR_NOTE_VELOCITY = 5;
+
+// UNUSED candidates (if I reimplement vol, sound/patch, and pan)
+// midi volume
+// midi sound/patch
+// midi pan
+
+
+
+/***
+   PIN definitions
+*/
 
 #define PIN_POT_TEMPO A6
 #define PIN_POT_2 A7
@@ -63,6 +88,8 @@
 
 SoftwareSerial midiSerial(PIN_MIDI_OUT_RX, PIN_MIDI_OUT_TX);
 
+
+
 BouncyButton btnR = BouncyButton(PIN_BTN_R);
 BouncyButton btnB = BouncyButton(PIN_BTN_B);
 BouncyButton btnG = BouncyButton(PIN_BTN_G);
@@ -70,9 +97,9 @@ BouncyButton btnZ = BouncyButton(PIN_BTN_Z);
 
 
 // true on any change (press or release)
-boolean isBeatRegisterChange=false;
+boolean isBeatRegisterChange = false;
 // only true for press, not for release
-boolean isBeatButtonPress=false;
+boolean isBeatButtonPress = false;
 
 byte bouncingCurrentBeatRegister;
 byte bouncingPreviousBeatRegister;
@@ -86,17 +113,22 @@ unsigned long lastDebounceTime;
 unsigned long nowMillis;
 
 unsigned long noteTimestamp;
-boolean notePlaying1=false;
-boolean notePlaying2=false;
+boolean notePlaying1 = false;
+boolean notePlaying2 = false;
 
-int notes1[] = {40, 40, 40, 40, 40, 40, 40, 40 };
-int notes2[] = {36, 36, 36, 36, 36, 36, 36, 36 };
+//int notes1[] = {40, 40, 40, 40, 40, 40, 40, 40 };
+//int notes2[] = {36, 36, 36, 36, 36, 36, 36, 36 };
+
+uint8_t midiNote1;
+uint8_t midiNote2;
+uint8_t midiNoteR;
+uint8_t midiNoteZ;
 
 // stores the bit pattern for for the red LED's indicating the beat
 byte redBits;
 
 // register for the beats on/off for the instrument
-byte instrument1=0xff, instrument2=0xff;
+byte instrument1 = 0xff, instrument2 = 0xff;
 
 
 #define NOTE_COUNT 8
@@ -111,34 +143,24 @@ const byte MIDI_NOTE_OFF = 128;
 // was 100, seems lengthy, eh?
 const int MIDI_SEND_DELAY = 1; // give MIDI-device a short time to "digest" MIDI messages
 
-// note lengths (bpm=128)
-int bpm = 128; // tempo, BPM (beats per minute)
-int t8 = 60000/bpm; // fractional part of millisec will be truncated, some ears might be accurate enough to detect?
+// note lengths, this default value gets overridden by potentiometer immediately, just need to avoid div/0
+//int bpm = 128; // tempo, BPM (beats per minute)
+//int t8 = 60000/bpm; // fractional part of millisec will be truncated, some ears might be accurate enough to detect?
+int bpm, t8;
 
-const int voiceMidiChannel = 0;
-const int voiceMidiPatch = 86;
-const int voiceMidiVolume = 80;
-const int voiceMidiPan = 100;
-const int midiVelocity = 100;
+uint8_t voiceMidiChannel;
+uint8_t midiVelocity;
+//const int voiceMidiPatch = 86;
+//const int voiceMidiVolume = 80;
+//const int voiceMidiPan = 100;
 
 
 // newTempo expected in range 0-1023 (i.e. analogRead)
 void updateTempo(int newTempo) {
   // map tempo value to BPM, then generate the rest
   bpm = map(newTempo, 0, 1023, 10, 1023);
-  t8 = 60000/bpm; // fractional part of millisec will be truncated, some ears might be accurate enough to detect?
-  /*
-  Serial.print("updateTempo(");
-  Serial.print(newTempo);
-  Serial.print(") bpm=");
-  Serial.print(bpm);
-  Serial.print(" t8=");
-  Serial.print(t8);
-  Serial.println("");
-  */
-
+  t8 = 60000 / bpm; // fractional part of millisec will be truncated, some ears might be accurate enough to detect?
 }
-
 
 //  Play a MIDI note
 void midiNote(int aMidiCommand, int aMidiPitch, int aMidiVelocity) {
@@ -165,9 +187,9 @@ void midiData2(int aMidiCommand, int aData1, int aData2) {
 void updateDisplay() {
 
   /*
-   * RED
-   */
-  
+     RED
+  */
+
   // disable all rows
   digitalWrite(PIN_LED_ROW_R, HIGH);
   digitalWrite(PIN_LED_ROW_B, HIGH);
@@ -209,7 +231,7 @@ void updateDisplay() {
   }
 
 
-  
+
   shiftOut(PIN_LED_COL_DATA, PIN_LED_COL_CLOCK, MSBFIRST, redBits);
   digitalWrite(PIN_LED_COL_LATCH, HIGH);
 
@@ -217,16 +239,16 @@ void updateDisplay() {
   digitalWrite(PIN_LED_ROW_R, LOW);
   delayMicroseconds(80);
   digitalWrite(PIN_LED_ROW_R, HIGH);
-  
+
   /*
-   * BLUE
-   */
+     BLUE
+  */
   digitalWrite(PIN_LED_COL_LATCH, LOW);
   shiftOut(PIN_LED_COL_DATA, PIN_LED_COL_CLOCK, MSBFIRST, instrument1);
   digitalWrite(PIN_LED_COL_LATCH, HIGH);
 
   // enable blue for a bit
-  if (instrument1==0xFF) {
+  if (instrument1 == 0xFF) {
     // all bits off, dont even show it
     delayMicroseconds(40);
   } else {
@@ -234,16 +256,16 @@ void updateDisplay() {
     delayMicroseconds(40);
     digitalWrite(PIN_LED_ROW_B, HIGH);
   }
-  
+
   /*
-   * GREEN
-   */
+     GREEN
+  */
   digitalWrite(PIN_LED_COL_LATCH, LOW);
   shiftOut(PIN_LED_COL_DATA, PIN_LED_COL_CLOCK, MSBFIRST, instrument2);
   digitalWrite(PIN_LED_COL_LATCH, HIGH);
 
   // enable green for a bit
-  if (instrument2==0xFF) {
+  if (instrument2 == 0xFF) {
     // all bits off, dont even show it
     delayMicroseconds(160);
   } else {
@@ -253,34 +275,88 @@ void updateDisplay() {
   }
 }
 
+void loadEEPROM() {
+  voiceMidiChannel = EEPROM.read(EEPROM_ADDR_MIDI_CHANNEL);
+  midiNote1 = EEPROM.read(EEPROM_ADDR_NOTE_1);
+  midiNote2 = EEPROM.read(EEPROM_ADDR_NOTE_2);
+  midiNoteR = EEPROM.read(EEPROM_ADDR_NOTE_R);
+  midiNoteZ = EEPROM.read(EEPROM_ADDR_NOTE_Z);
+  midiVelocity = EEPROM.read(EEPROM_ADDR_NOTE_VELOCITY);
+}
+
+void listEEPROM() {
+  Serial.println(F("list-begin"));
+  printEEPROM(EEPROM_ADDR_MIDI_CHANNEL);
+  printEEPROM(EEPROM_ADDR_NOTE_1);
+  printEEPROM(EEPROM_ADDR_NOTE_2);
+  printEEPROM(EEPROM_ADDR_NOTE_R);
+  printEEPROM(EEPROM_ADDR_NOTE_Z);
+  printEEPROM(EEPROM_ADDR_NOTE_VELOCITY);
+  Serial.println(F("list-end"));
+}
+
+void printEEPROM(uint8_t addr, uint8_t oldValue, boolean isUpdate) {
+
+  uint8_t xVal = EEPROM.read(addr);
+
+  if (isUpdate) {
+    Serial.print(F("update: "));
+  }
+
+  Serial.print(F("addr ["));
+  Serial.print(addr);
+  Serial.print(F("]/["));
+  printBinaryByte(addr);
+
+  Serial.print(F("] val ["));
+  Serial.print(xVal);
+  Serial.print(F("]/["));
+  printBinaryByte(xVal);
+
+  if (isUpdate) {
+    Serial.print(F("] old ["));
+    Serial.print(oldValue);
+    Serial.print(F("]/["));
+    printBinaryByte(oldValue);
+  }
+
+  Serial.println(F("]"));
+}
+
+void printEEPROM(uint8_t addr) {
+  printEEPROM(addr, 0x00, false);
+}
 
 
 void setup() {
+
   // LED row transistor pins (HIGH to shut them off at boot)
   pinMode(PIN_LED_ROW_R, OUTPUT);
   digitalWrite(PIN_LED_ROW_R, HIGH);
-  
+
   pinMode(PIN_LED_ROW_B, OUTPUT);
   digitalWrite(PIN_LED_ROW_B, HIGH);
-  
+
   pinMode(PIN_LED_ROW_G, OUTPUT);
   digitalWrite(PIN_LED_ROW_G, HIGH);
 
 
-  
-  Serial.begin(115200);
+  loadEEPROM();
+
+  Serial.begin(9600);
   delay(10);
-  Serial.println("HC MIDI Mud");
+  Serial.println(F("HC MIDI Mud"));
+
 
   // initialize MIDI standard baud rate 31250
   midiSerial.begin(31250);
   delay(MIDI_SEND_DELAY);
-  
+
 
   // LED column shift register pins
   pinMode(PIN_LED_COL_DATA, OUTPUT);
   pinMode(PIN_LED_COL_CLOCK, OUTPUT);
-  pinMode(PIN_LED_COL_LATCH, OUTPUT);  
+  pinMode(PIN_LED_COL_LATCH, OUTPUT);
 
 
   // 4 buttons on the right
@@ -303,22 +379,21 @@ void setup() {
   digitalWrite(PIN_BEAT_LATCH, LOW);
   digitalWrite(PIN_BEAT_CLOCK, HIGH);
 
-
   updateDisplay();
 
+  /*
+    // volume
+    midiData2((0xB0 | voiceMidiChannel), 07, voiceMidiVolume);
+    delay(MIDI_SEND_DELAY);
 
-  // volume
-  midiData2((0xB0 | voiceMidiChannel), 07, voiceMidiVolume);
-  delay(MIDI_SEND_DELAY);
+    // sound/patch
+    midiData1((0xC0 | voiceMidiChannel), voiceMidiPatch);
+    delay(MIDI_SEND_DELAY);
 
-  // sound/patch
-  midiData1((0xC0 | voiceMidiChannel), voiceMidiPatch);
-  delay(MIDI_SEND_DELAY);
-
-  // pan
-  midiData2((0xB0 | voiceMidiChannel), 10, voiceMidiPan);
-  delay(MIDI_SEND_DELAY);
-
+    // pan
+    midiData2((0xB0 | voiceMidiChannel), 10, voiceMidiPan);
+    delay(MIDI_SEND_DELAY);
+  */
 
 }
 
@@ -329,55 +404,90 @@ void loop() {
   nowMillis = millis();
 
   // PIN_POT_TEMPO / A6 is wired backwards, so subtract from 1023
-  updateTempo(1023-analogRead(PIN_POT_TEMPO));
-  
-  if ((nowMillis-noteTimestamp)>t8) {
+  updateTempo(1023 - analogRead(PIN_POT_TEMPO));
+
+
+  /***
+     Check for configuration data on the Serial port
+  */
+  if (Serial.available() >= 2) {
+    uint8_t xAddr = Serial.read();
+    uint8_t xVal  = Serial.read();
+
+    // HCGS list is addr=254, val=254.  Protocol's up the creek if that's a legit use case.
+    if (xAddr == 0xFE && xVal == 0xFE) {
+      // send a listing of the EEPROM values
+      listEEPROM();
+
+    } else {
+      uint8_t oldVal = EEPROM.read(xAddr);
+      EEPROM.write(xAddr, xVal);
+      printEEPROM(xAddr, oldVal, true);
+      loadEEPROM();
+    }
+  }
+
+
+
+  /***
+     Advance to the next beat
+  */
+
+
+  if ((nowMillis - noteTimestamp) > t8) {
+
     // time to play the next note
     noteTimestamp = nowMillis;
 
     // if we are playng a note, turn it off
     if (notePlaying1) {
-      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, notes1[noteIndex], midiVelocity);
-      notePlaying1=false;
+      //midiNote(MIDI_NOTE_OFF + voiceMidiChannel, notes1[noteIndex], midiVelocity);
+      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, midiNote1, midiVelocity);
+      notePlaying1 = false;
     }
     if (notePlaying2) {
-      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, notes2[noteIndex], midiVelocity);
-      notePlaying2=false;
+      //midiNote(MIDI_NOTE_OFF + voiceMidiChannel, notes2[noteIndex], midiVelocity);
+      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, midiNote2, midiVelocity);
+      notePlaying2 = false;
     }
 
     noteIndex++;
-    if (noteIndex>=NOTE_COUNT) {
-      noteIndex=0;
+    if (noteIndex >= NOTE_COUNT) {
+      noteIndex = 0;
     }
 
     // kind of a reverse-endian thing, my mind thinks of bit zero on the left, but math/everybody/computers think of bit zero on the right
     byte bitIndex = 7 - noteIndex;
-    
+
     // turn the next note on
     if (!bit_is_set(instrument1, bitIndex)) {
-      notePlaying1=true;
-      midiNote(MIDI_NOTE_ON + voiceMidiChannel, notes1[noteIndex], midiVelocity);
+      notePlaying1 = true;
+      //midiNote(MIDI_NOTE_ON + voiceMidiChannel, notes1[noteIndex], midiVelocity);
+      midiNote(MIDI_NOTE_ON + voiceMidiChannel, midiNote1, midiVelocity);
     }
 
     if (!bit_is_set(instrument2, bitIndex)) {
       /*
-      Serial.print("ins2 noteOn noteIndex=");
-      Serial.print(noteIndex);
-      Serial.print(" bitIndex=");
-      Serial.print(bitIndex);
-      Serial.print(" ins2=");
-      printBinaryByte(instrument2);
-      Serial.print(" redBits=");
-      printBinaryByte(redBits);
-      Serial.println("");
+        Serial.print("ins2 noteOn noteIndex=");
+        Serial.print(noteIndex);
+        Serial.print(" bitIndex=");
+        Serial.print(bitIndex);
+        Serial.print(" ins2=");
+        printBinaryByte(instrument2);
+        Serial.print(" redBits=");
+        printBinaryByte(redBits);
+        Serial.println("");
       */
-      notePlaying2=true;
-      midiNote(MIDI_NOTE_ON + voiceMidiChannel, notes2[noteIndex], midiVelocity);
+      notePlaying2 = true;
+      //midiNote(MIDI_NOTE_ON + voiceMidiChannel, notes2[noteIndex], midiVelocity);
+      midiNote(MIDI_NOTE_ON + voiceMidiChannel, midiNote2, midiVelocity);
     }
   }
 
 
-  // read the multiplexed buttons
+  /***
+     read the multiplexed buttons
+  */
 
   // latch HIGH and delay, allowing us to provide the LOW transition to begin reading
   digitalWrite(PIN_BEAT_LATCH, HIGH);
@@ -386,7 +496,7 @@ void loop() {
   // latch LOW tells the multiplexer to latch the button states so we can begin reading
   digitalWrite(PIN_BEAT_LATCH, LOW);
 
-  isBeatRegisterChange=false;
+  isBeatRegisterChange = false;
   bouncingCurrentBeatRegister = shiftIn(PIN_BEAT_DATA, PIN_BEAT_CLOCK, LSBFIRST);
 
   if (bouncingCurrentBeatRegister != bouncingPreviousBeatRegister) {
@@ -395,17 +505,17 @@ void loop() {
   }
 
 
-  isBeatRegisterChange = bouncingCurrentBeatRegister!=beatRegister;
+  isBeatRegisterChange = bouncingCurrentBeatRegister != beatRegister;
 
-  if ((millis()-lastDebounceTime)> DEBOUNCE_DELAY_MILLIS && isBeatRegisterChange) {
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY_MILLIS && isBeatRegisterChange) {
     // bouncing is done and there is a state change, make it live
     previousBeatRegister = beatRegister;
     beatRegister = bouncingCurrentBeatRegister;
 
     // determine if it is a PRESS, we dont care about release
-    for (byte bitIdx=0; bitIdx<8; bitIdx++) {
-      boolean prevBit = previousBeatRegister & (1<<bitIdx);
-      boolean curBit = beatRegister & (1<<bitIdx);
+    for (byte bitIdx = 0; bitIdx < 8; bitIdx++) {
+      boolean prevBit = previousBeatRegister & (1 << bitIdx);
+      boolean curBit = beatRegister & (1 << bitIdx);
 
       // not equals means either press or relase....
       if (prevBit != curBit) {
@@ -424,40 +534,50 @@ void loop() {
             //Serial.println("");
           }
         }
-
-        
       }
     }
   }
 
   // update the "previous" value for the next iteration
   bouncingPreviousBeatRegister = bouncingCurrentBeatRegister;
-  
 
-  
 
-  if (btnR.update() && !btnR.getState()) {
-    // make sure to call update() every loop(), even if "then" clause is blank
-    //Serial.println(F("red down"));
+
+
+  if (btnR.update()) {
+    if (btnR.getState()) {
+      // released, NOTE OFF
+      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, midiNoteR, midiVelocity);
+    } else {
+      // pressed down, NOTE ON
+      midiNote(MIDI_NOTE_ON + voiceMidiChannel, midiNoteR, midiVelocity);
+      Serial.println("red button");
+    }
   }
+
+  if (btnZ.update()) {
+    if (btnZ.getState()) {
+      // released, NOTE OFF
+      midiNote(MIDI_NOTE_OFF + voiceMidiChannel, midiNoteZ, midiVelocity);
+    } else {
+      // pressed down, NOTE ON
+      midiNote(MIDI_NOTE_ON + voiceMidiChannel, midiNoteZ, midiVelocity);
+    }
+  }
+
 
   if (btnB.update() && !btnB.getState()) {
     // make sure to call update() every loop(), even if "then" clause is blank
-    //Serial.println(F("blue down"));
+
+    // blank "then" clause because the actual press or release event doesn't matter, this button is a modifier for the column/beat buttons
   }
 
   if (btnG.update() && !btnG.getState()) {
     // make sure to call update() every loop(), even if "then" clause is blank
-    //Serial.println(F("green down"));
+
+    // blank "then" clause because the actual press or release event doesn't matter, this button is a modifier for the column/beat buttons
   }
 
-  if (btnZ.update()) {
-    // make sure to call update() every loop(), even if "then" clause is blank
-    if (!btnZ.getState()) {
-//      Serial.println(F("zed button update"));
-
-    }
-  }
 
 
   // when don't you update the display? same as when you don't eat the cat food.
@@ -466,8 +586,8 @@ void loop() {
 
 void printBinaryByte(byte b) {
   int x;
-  for (x=8; x>0; x--) {
-    if ((b>>(x-1))&1) {
+  for (x = 8; x > 0; x--) {
+    if ((b >> (x - 1)) & 1) {
       Serial.print("1");
     } else {
       Serial.print("0");
